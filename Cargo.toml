@@ -1,0 +1,11 @@
+[package]
+name = "pyo3hp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rocket = "0.5.1"
+
+[dependencies.pyo3]
+version = "0.21.2"
+features = ["auto-initialize"]
