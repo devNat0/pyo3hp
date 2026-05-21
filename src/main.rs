@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use std::ffi::CString;
+use std::path::PathBuf;
 use std::{fs, path::Path};
 
 use http_body_util::Full;
@@ -30,7 +31,14 @@ impl LoggingStdout {
 const APP_ROOT: &str = "python_app/";
 const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
-fn parse(url: String) -> String {
+fn get_file_path(path: &str) -> PathBuf {
+    let index = "index.py";
+    let url = if path.ends_with('/') {
+        format!("{}{index}", path)
+    } else {
+        path.to_string()
+    };
+
     let url = url.strip_prefix('/').unwrap();
     let py_path = Path::new(PROJECT_ROOT).join(APP_ROOT).join(url);
     if !py_path.is_file() {
@@ -38,7 +46,11 @@ fn parse(url: String) -> String {
     }
     println!("{}", py_path.display());
     println!("{}", APP_ROOT);
-    let code = fs::read_to_string(py_path).unwrap();
+    py_path
+}
+
+fn run_python_file(file_path: PathBuf) -> String {
+    let code = fs::read_to_string(file_path).unwrap();
     Python::attach(|py| {
         let obj = Bound::new(
             py,
@@ -86,15 +98,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 }
 
-fn get_file(path: &str) -> String {
-    let index = "index.py";
-    if path.ends_with('/') {
-        format!("{}{index}", path)
-    } else {
-        path.to_string()
-    }
-}
-
 // https://github.com/hyperium/hyper/blob/master/examples/service_struct_impl.rs
 #[derive(Debug, Clone)]
 struct Svc {
@@ -110,7 +113,11 @@ impl Service<Request<IncomingBody>> for Svc {
         fn mk_response(s: String) -> Result<Response<Full<Bytes>>, hyper::Error> {
             Ok(Response::new(Full::new(Bytes::from(s))))
         }
-        let res = mk_response(parse(get_file(req.uri().path())));
+        let res = mk_response(
+            run_python_file(
+                get_file_path(req.uri().path())
+            )
+        );
         Box::pin(async { res })
     }
 }
