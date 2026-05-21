@@ -1,13 +1,19 @@
-#[macro_use]
-extern crate rocket;
-use pyo3::{ffi::c_str, prelude::*};
-use pyo3::types::IntoPyDict;
-use rocket::response::content::RawHtml;
+use pyo3::prelude::*;
 use std::ffi::CString;
 use std::{fs, path::Path};
 
-const APP_ROOT: &str = "python_app/";
-const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
+use http_body_util::Full;
+use hyper::body::Bytes;
+use hyper::server::conn::http1;
+use hyper::service::Service;
+use hyper::{body::Incoming as IncomingBody, Request, Response};
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpListener;
+
+use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 #[pyclass]
 struct LoggingStdout {
@@ -21,28 +27,90 @@ impl LoggingStdout {
     }
 }
 
-fn parse(url: &str) -> String {
-    let py_path = Path::new(PROJECT_ROOT)
-        .join(APP_ROOT)
-        .join(url.to_owned() + ".py");
+const APP_ROOT: &str = "python_app/";
+const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
+
+fn parse(url: String) -> String {
+    let url = url.strip_prefix('/').unwrap();
+    let py_path = Path::new(PROJECT_ROOT).join(APP_ROOT).join(url);
+    if !py_path.is_file() {
+        println!("file doesnt exist {}", py_path.display());
+    }
+    println!("{}", py_path.display());
+    println!("{}", APP_ROOT);
     let code = fs::read_to_string(py_path).unwrap();
     Python::attach(|py| {
-        let obj = Bound::new(py, LoggingStdout{buffer: "".to_string()}).unwrap();
+        let obj = Bound::new(
+            py,
+            LoggingStdout {
+                buffer: "".to_string(),
+            },
+        )
+        .unwrap();
         let sys = py.import("sys").unwrap();
         let _ = sys.setattr("stdout", &obj);
-        PyModule::from_code(py, CString::new(code).unwrap().as_c_str(), c"mycode.py", c"mycode").unwrap();
+        PyModule::from_code(
+            py,
+            CString::new(code).unwrap().as_c_str(),
+            c"",
+            c"",
+        )
+        .unwrap();
         let val: PyRefMut<'_, LoggingStdout> = obj.extract().unwrap();
         val.buffer.clone()
     })
 }
 
-#[get("/")]
-fn index() -> RawHtml<String> {
-    // TODO: redirect to /index.py
-    RawHtml(parse("index"))
+type Counter = i32;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let addr: SocketAddr = ([127, 0, 0, 1], 3000).into();
+
+    let listener = TcpListener::bind(addr).await?;
+    println!("Listening on http://{}", addr);
+
+    let svc = Svc {
+        counter: Arc::new(Mutex::new(0)),
+    };
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let svc_clone = svc.clone();
+        tokio::task::spawn(async move {
+            if let Err(err) = http1::Builder::new().serve_connection(io, svc_clone).await {
+                println!("Failed to serve connection: {:?}", err);
+            }
+        });
+    }
 }
 
-#[launch]
-fn rocket() -> _ {
-    rocket::build().mount("/", routes![index])
+fn get_file(path: &str) -> String {
+    let index = "index.py";
+    if path.ends_with('/') {
+        format!("{}{index}", path)
+    } else {
+        path.to_string()
+    }
+}
+
+// https://github.com/hyperium/hyper/blob/master/examples/service_struct_impl.rs
+#[derive(Debug, Clone)]
+struct Svc {
+    counter: Arc<Mutex<Counter>>,
+}
+
+impl Service<Request<IncomingBody>> for Svc {
+    type Response = Response<Full<Bytes>>;
+    type Error = hyper::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn call(&self, req: Request<IncomingBody>) -> Self::Future {
+        fn mk_response(s: String) -> Result<Response<Full<Bytes>>, hyper::Error> {
+            Ok(Response::new(Full::new(Bytes::from(s))))
+        }
+        let res = mk_response(parse(get_file(req.uri().path())));
+        Box::pin(async { res })
+    }
 }

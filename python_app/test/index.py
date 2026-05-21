@@ -6,12 +6,12 @@ print("""<!DOCTYPE html>
 <body>
 """)
 
-print("Hello from index.py:", shell)
+print("Hello from test/index.py:", shell)
 print("<br>")
 
-color = "red"
+color = "blue"
 print(f"My car is {color} <br>")
-print("<a href=\"/test/index.py\">Next page</a>")
+
 
 print("""
 </body>
